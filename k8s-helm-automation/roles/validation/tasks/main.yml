@@ -1,0 +1,286 @@
+---
+# roles/validation/tasks/main.yml
+# Deployment validation tasks
+
+# roles/validation/tasks/main.yml
+---
+# Set validation parameters
+- name: Set validation parameters
+  ansible.builtin.set_fact:
+    validation_app_name: "{{ validation_app_name | default(chart_name) }}"
+    validation_level_type: "{{ validation_level_type | default('basic') }}"
+    validation_timeout: "{{ validation_timeout | default(300) }}"
+    validation_retries: "{{ validation_retries | default(3) }}"
+    validation_namespace: "{{ namespace | default('default') }}"
+    validation_expected_replicas: "{{ expected_replicas | default(1) }}"
+
+- name: Include chart-specific validation tasks if available
+  include_tasks: "{{ playbook_dir }}/roles/validation/tasks/{{ chart_name }}.yml"
+  when: 
+    - lookup('first_found', {'files': ['{{ playbook_dir }}/roles/validation/tasks/{{ chart_name }}.yml'], 'errors': 'ignore'}) != ""
+    - chart_specific_validation | default(true) | bool
+  ignore_errors: yes
+
+- name: Basic validation
+  block:
+    - name: Wait for pods to be ready
+      shell: >-
+        kubectl wait --for=condition=ready pods 
+        -l app={{ app_name | default(release_name) }} 
+        -n {{ namespace }}
+        --timeout={{ validation_timeout }}s
+      register: pods_ready
+      retries: "{{ validation_retries }}"
+      delay: 10
+      until: pods_ready.rc == 0
+      failed_when: false
+      
+    - name: Get pod status
+      command: kubectl get pods -n {{ namespace }} -l app={{ app_name | default(release_name) }} -o wide
+      register: pod_status
+      
+    - name: Display pod status
+      debug:
+        var: pod_status.stdout_lines
+        
+    - name: Check services
+      command: kubectl get svc -n {{ namespace }} -l app={{ app_name | default(release_name) }}
+      register: service_check
+      failed_when: false
+      
+    - name: Display service status
+      debug:
+        var: service_check.stdout_lines
+      when: service_check.rc == 0
+      
+    - name: Verify replica count for deployments
+      shell: |
+        READY_REPLICAS=$(kubectl get deployment -n {{ namespace }} -l app={{ app_name | default(release_name) }} -o jsonpath='{.items[0].status.readyReplicas}')
+        if [ "$READY_REPLICAS" -eq "{{ expected_replicas }}" ]; then
+          echo "Correct number of replicas running: $READY_REPLICAS"
+          exit 0
+        else
+          echo "Incorrect number of replicas. Expected: {{ expected_replicas }}, Got: $READY_REPLICAS"
+          exit 1
+        fi
+      register: replica_check
+      failed_when: false
+      
+    - name: Verify replica count for statefulsets
+      shell: |
+        READY_REPLICAS=$(kubectl get statefulset -n {{ namespace }} -l app={{ app_name | default(release_name) }} -o jsonpath='{.items[0].status.readyReplicas}')
+        if [ "$READY_REPLICAS" -eq "{{ expected_replicas }}" ]; then
+          echo "Correct number of replicas running: $READY_REPLICAS"
+          exit 0
+        else
+          echo "Incorrect number of replicas. Expected: {{ expected_replicas }}, Got: $READY_REPLICAS"
+          exit 1
+        fi
+      register: statefulset_check
+      failed_when: false
+      when: replica_check.rc != 0
+
+- name: Extended validation
+  when: validation_level == "full"
+  block:
+    - name: Check for configuration errors in logs
+      shell: |
+        set -e
+        PODS=$(kubectl get pods -n {{ namespace }} -l app={{ app_name | default(release_name) }} -o name)
+        ERROR_COUNT=0
+        for POD in $PODS; do
+          ERRORS=$(kubectl logs -n {{ namespace }} $POD --tail=50 | grep -i "error\|exception\|fail" | grep -v "debug" | wc -l)
+          if [ $ERRORS -gt 0 ]; then
+            ERROR_COUNT=$((ERROR_COUNT + ERRORS))
+            echo "Found $ERRORS potential errors in logs for $POD"
+          fi
+        done
+        
+        if [ $ERROR_COUNT -gt {{ error_threshold | default(5) }} ]; then
+          echo "Total of $ERROR_COUNT errors found in logs, exceeding threshold of {{ error_threshold | default(5) }}"
+          exit 1
+        else
+          echo "Found $ERROR_COUNT errors in logs, below threshold of {{ error_threshold | default(5) }}"
+          exit 0
+        fi
+      register: log_check
+      failed_when: false
+      
+    - name: Display log check results
+      debug:
+        var: log_check.stdout_lines
+      
+    - name: Verify resource requests and limits
+      shell: |
+        PODS=$(kubectl get pods -n {{ namespace }} -l app={{ app_name | default(release_name) }} -o name)
+        MISSING_RESOURCES=0
+        
+        for POD in $PODS; do
+          # Check for missing resource requests or limits
+          MISSING=$(kubectl get $POD -n {{ namespace }} -o jsonpath='{.spec.containers[*].resources}' | grep -c "map[]")
+          if [ $MISSING -gt 0 ]; then
+            MISSING_RESOURCES=$((MISSING_RESOURCES + 1))
+            echo "Missing resource requests or limits in $POD"
+          fi
+        done
+        
+        if [ $MISSING_RESOURCES -gt 0 ]; then
+          echo "$MISSING_RESOURCES pods missing resource configurations"
+          exit 1
+        else
+          echo "All pods have resource configurations"
+          exit 0
+        fi
+      register: resource_check
+      failed_when: false
+      when: validate_resources | default(true) | bool
+      
+    - name: Display resource check results
+      debug:
+        var: resource_check.stdout_lines
+      when: validate_resources | default(true) | bool
+      
+    - name: Check for persistent volume claims if applicable
+      shell: |
+        PVC_COUNT=$(kubectl get pvc -n {{ namespace }} -l app={{ app_name | default(release_name) }} | grep -v NAME | wc -l)
+        echo "Found $PVC_COUNT persistent volume claims"
+        
+        if [ {{ persistence_expected | default(0) }} -gt 0 ] && [ $PVC_COUNT -eq 0 ]; then
+          echo "Expected persistent storage but found no PVCs"
+          exit 1
+        elif [ {{ persistence_expected | default(0) }} -eq 0 ] && [ $PVC_COUNT -gt 0 ]; then
+          echo "Did not expect persistent storage but found PVCs"
+          exit 0
+        else
+          echo "Persistence configuration as expected"
+          exit 0
+        fi
+      register: pvc_check
+      failed_when: false
+      when: validate_persistence | default(true) | bool
+      
+    - name: Display PVC check results
+      debug:
+        var: pvc_check.stdout_lines
+      when: validate_persistence | default(true) | bool
+      
+    - name: Verify application health check endpoint
+      shell: |
+        set -e
+        POD=$(kubectl get pods -n {{ namespace }} -l app={{ app_name | default(release_name) }} -o name | head -n 1)
+        PORT=$(kubectl get svc -n {{ namespace }} {{ release_name }} -o jsonpath='{.spec.ports[0].port}')
+        
+        if [ -z "$PORT" ]; then
+          echo "No service port found"
+          exit 1
+        fi
+        
+        # Attempt to access health endpoint
+        STATUS=$(kubectl exec -n {{ namespace }} $POD -- curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT{{ health_endpoint | default('/health') }})
+        
+        if [ "$STATUS" == "200" ]; then
+          echo "Health check successful (HTTP 200)"
+          exit 0
+        else
+          echo "Health check failed with status $STATUS"
+          exit 1
+        fi
+      register: health_check
+      failed_when: false
+      when: 
+        - validate_health_endpoint | default(false) | bool
+        - health_endpoint is defined
+        
+    - name: Display health check results
+      debug:
+        var: health_check.stdout_lines
+      when: 
+        - validate_health_endpoint | default(false) | bool
+        - health_endpoint is defined
+
+- name: Metabase-specific validation
+  when: 
+    - chart_name == "metabase-k8s" or app_name == "metabase-k8s"
+    - metabase_specific_validation | default(true) | bool
+  block:
+    - name: Check if Metabase UI is accessible
+      shell: |
+        set -e
+        POD=$(kubectl get pods -n {{ namespace }} -l app={{ app_name | default(release_name) }} -o name | head -n 1)
+        PORT=$(kubectl get svc -n {{ namespace }} {{ release_name }} -o jsonpath='{.spec.ports[0].port}')
+        
+        if [ -z "$PORT" ]; then
+          echo "No service port found"
+          exit 1
+        fi
+        
+        # Check if the setup page or login page loads
+        RESULT=$(kubectl exec -n {{ namespace }} $POD -- curl -s http://localhost:$PORT | grep -i "metabase")
+        if [ $? -eq 0 ]; then
+          echo "Metabase UI appears to be accessible"
+          exit 0
+        else
+          echo "Metabase UI not accessible"
+          exit 1
+        fi
+      register: metabase_ui_check
+      failed_when: false
+      
+    - name: Display Metabase UI check results
+      debug:
+        var: metabase_ui_check.stdout_lines
+
+- name: Validation summary
+  debug:
+    msg: |
+      =====================================
+      Deployment Validation Summary
+      =====================================
+      Release: {{ release_name }}
+      Namespace: {{ namespace }}
+      Validation Level: {{ validation_level }}
+      
+      Basic Validation:
+        Pods Ready: {{ 'PASSED' if pods_ready.rc == 0 else 'FAILED' }}
+        Services: {{ 'PASSED' if service_check.rc == 0 else 'FAILED' }}
+        Replica Count: {{ 'PASSED' if replica_check.rc == 0 or statefulset_check.rc == 0 else 'FAILED' }}
+      
+      {% if validation_level == "full" %}
+      Extended Validation:
+        Log Check: {{ 'PASSED' if log_check.rc == 0 else 'WARNING - Check logs' }}
+        {% if validate_resources | default(true) | bool %}
+        Resource Check: {{ 'PASSED' if resource_check.rc == 0 else 'FAILED' }}
+        {% endif %}
+        {% if validate_persistence | default(true) | bool %}
+        PVC Check: {{ 'PASSED' if pvc_check.rc == 0 else 'FAILED' }}
+        {% endif %}
+        {% if validate_health_endpoint | default(false) | bool and health_endpoint is defined %}
+        Health Endpoint: {{ 'PASSED' if health_check.rc == 0 else 'FAILED' }}
+        {% endif %}
+      {% endif %}
+      
+      {% if chart_name == "metabase-k8s" or app_name == "metabase-k8s" and metabase_specific_validation | default(true) | bool %}
+      Metabase-Specific Validation:
+        UI Access: {{ 'PASSED' if metabase_ui_check.rc == 0 else 'FAILED' }}
+      {% endif %}
+      =====================================
+
+- name: Fail if critical validations failed
+  fail:
+    msg: "Validation failed: {{ validation_failure_reason }}"
+  when: 
+    - fail_on_validation_error | default(true) | bool
+    - (pods_ready.rc != 0 and pods_ready is defined) or
+      (validation_level == "full" and validate_health_endpoint | default(false) | bool and health_endpoint is defined and health_check.rc != 0 and health_check is defined) or
+      (chart_name == "metabase-k8s" and metabase_specific_validation | default(true) | bool and metabase_ui_check.rc != 0 and metabase_ui_check is defined)
+  vars:
+    validation_failure_reason: >-
+      {% if pods_ready.rc != 0 and pods_ready is defined %}
+      Pods not ready
+      {% elif validation_level == "full" and validate_health_endpoint | default(false) | bool and health_endpoint is defined and health_check.rc != 0 and health_check is defined %}
+      Health check failed
+      {% elif chart_name == "metabase-k8s" and metabase_specific_validation | default(true) | bool and metabase_ui_check.rc != 0 and metabase_ui_check is defined %}
+      Metabase UI check failed
+      {% else %}
+      Unknown validation error
+      {% endif %}

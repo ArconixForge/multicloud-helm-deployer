@@ -1,0 +1,75 @@
+---
+# deploy-helm-chart.yml
+# Production-grade playbook for deploying Helm charts to Kubernetes clusters
+
+- name: Deploy Helm Chart to Kubernetes Cluster
+  hosts: "{{ deploy_hosts | default('localhost') }}"
+  connection: "{{ connection_type | default('local') }}"
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../vars/common.yml"
+    - "{{ playbook_dir }}/../vars/{{ environment | default('dev') }}.yml"
+
+  pre_tasks:
+    - name: Include cloud provider variables
+      ansible.builtin.include_vars: "{{ playbook_dir }}/../vars/cloud_providers/{{ cloud_provider }}.yml"
+      when: cloud_provider is defined
+      tags: always
+
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - chart_name is defined
+          - chart_name | length > 0
+          - cluster_name is defined
+          - cluster_name | length > 0
+        fail_msg: "Missing required variables: chart_name and cluster_name must be defined"
+        success_msg: "Required variables validated successfully"
+      tags: always
+
+    - name: Set default release name if not provided
+      ansible.builtin.set_fact:
+        release_name: "{{ release_name | default(chart_name) }}"
+      tags: always
+
+  roles:
+    - role: kubernetes_auth
+      tags: ['auth', 'kubernetes']
+
+    - role: kubernetes_namespace
+      tags: ['namespace', 'kubernetes']
+      when: create_namespace | default(true) | bool
+
+    - role: helm_repo
+      tags: ['helm', 'repo']
+      when: chart_repo is defined and chart_repo | length > 0
+
+    - role: helm_deploy
+      tags: ['helm', 'deploy']
+
+  post_tasks:
+    - name: Include validation tasks
+      ansible.builtin.include_role:
+        name: validation
+      vars:
+        validation_app_name: "{{ app_name | default(chart_name) }}"
+        validation_level_type: "{{ validation_level | default('basic') }}"
+      when: validate | default(true) | bool
+      tags: ['validation']
+
+    - name: Deployment summary
+      ansible.builtin.debug:
+        msg: |
+          =============================================
+          Deployment Summary
+          =============================================
+          Environment: {{ environment | default('dev') }}
+          Cloud Provider: {{ cloud_provider | default('local') }}
+          Cluster: {{ cluster_name }}
+          Namespace: {{ namespace | default('default') }}
+          Chart: {{ chart_name }}
+          Release: {{ release_name }}
+          Chart Version: {{ chart_version | default('latest') }}
+          =============================================
+      tags: ['summary']

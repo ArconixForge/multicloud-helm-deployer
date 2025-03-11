@@ -1,0 +1,156 @@
+---
+# roles/kubernetes/auth/tasks/main.yml
+# Authentication tasks for different cloud providers
+
+- name: Ensure cloud provider is supported
+  assert:
+    that:
+      - cloud_provider in ['gcp', 'aws', 'azure', 'local']
+    fail_msg: "Unsupported cloud provider: {{ cloud_provider }}. Supported providers are: gcp, aws, azure, local"
+  when: cloud_provider is defined
+  
+- name: Use local configuration if cloud_provider is not specified
+  set_fact:
+    cloud_provider: "local"
+  when: cloud_provider is not defined
+
+# GCP Authentication
+- name: Authenticate with GCP
+  when: cloud_provider == "gcp"
+  block:
+    - name: Check if gcloud CLI is installed
+      command: which gcloud
+      register: gcloud_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Fail if gcloud is not installed
+      fail:
+        msg: "gcloud CLI is required for GCP authentication but was not found"
+      when: gcloud_check.rc != 0
+      
+    - name: Authenticate using service account
+      command: gcloud auth activate-service-account --key-file={{ gcp_key_file }}
+      environment:
+        CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+      when: 
+        - gcp_key_file is defined
+        - gcp_key_file | length > 0
+      register: gcp_auth
+      no_log: "{{ no_log_credentials | default(true) }}"
+      
+    - name: Get GKE cluster credentials
+      command: >
+        gcloud container clusters get-credentials {{ cluster_name }}
+        --region {{ gcp_region | default('us-central1') }}
+        --project {{ gcp_project }}
+      environment:
+        CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+      when: gcp_project is defined
+      register: gke_creds
+      no_log: "{{ no_log_credentials | default(true) }}"
+
+# AWS Authentication
+- name: Authenticate with AWS
+  when: cloud_provider == "aws"
+  block:
+    - name: Check if aws CLI is installed
+      command: which aws
+      register: aws_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Fail if aws CLI is not installed
+      fail:
+        msg: "AWS CLI is required for AWS authentication but was not found"
+      when: aws_check.rc != 0
+      
+    - name: Configure AWS CLI profile
+      command: "{{ item }}"
+      with_items:
+        - aws configure set aws_access_key_id {{ aws_access_key }}
+        - aws configure set aws_secret_access_key {{ aws_secret_key }}
+        - aws configure set region {{ aws_region | default('us-east-1') }}
+        - aws configure set output json
+      when: 
+        - aws_access_key is defined
+        - aws_secret_key is defined
+      no_log: "{{ no_log_credentials | default(true) }}"
+      
+    - name: Get EKS cluster credentials
+      command: >
+        aws eks update-kubeconfig 
+        --name {{ cluster_name }} 
+        --region {{ aws_region | default('us-east-1') }}
+      register: eks_creds
+      no_log: "{{ no_log_credentials | default(true) }}"
+
+# Azure Authentication
+- name: Authenticate with Azure
+  when: cloud_provider == "azure"
+  block:
+    - name: Check if az CLI is installed
+      command: which az
+      register: az_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Fail if az CLI is not installed
+      fail:
+        msg: "Azure CLI is required for Azure authentication but was not found"
+      when: az_check.rc != 0
+      
+    - name: Login to Azure with service principal
+      command: >
+        az login --service-principal 
+        --username {{ azure_app_id }} 
+        --password {{ azure_password }} 
+        --tenant {{ azure_tenant }}
+      when: 
+        - azure_app_id is defined
+        - azure_password is defined
+        - azure_tenant is defined
+      register: az_login
+      no_log: "{{ no_log_credentials | default(true) }}"
+      
+    - name: Get AKS cluster credentials
+      command: >
+        az aks get-credentials 
+        --resource-group {{ azure_resource_group }} 
+        --name {{ cluster_name }} 
+        --overwrite-existing
+      when: azure_resource_group is defined
+      register: aks_creds
+      no_log: "{{ no_log_credentials | default(true) }}"
+
+# Local authentication (use current kubeconfig)
+- name: Verify local Kubernetes configuration
+  when: cloud_provider == "local"
+  block:
+    - name: Check if kubectl is installed
+      command: which kubectl
+      register: kubectl_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Fail if kubectl is not installed
+      fail:
+        msg: "kubectl is required but was not found"
+      when: kubectl_check.rc != 0
+      
+    - name: Verify cluster access
+      command: kubectl cluster-info
+      register: cluster_info
+      failed_when: false
+      
+    - name: Switch kubectl context if context_name is provided
+      command: kubectl config use-context {{ context_name }}
+      when: 
+        - context_name is defined
+        - context_name | length > 0
+      register: kubectl_context
+        
+    - name: Display warning if cluster access failed
+      debug:
+        msg: "WARNING: Unable to connect to Kubernetes cluster. Deployment may fail."
+      when: cluster_info.rc != 0

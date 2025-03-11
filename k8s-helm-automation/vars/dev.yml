@@ -1,0 +1,55 @@
+---
+# Development environment variables for Metabase deployment
+
+# Environment identifier
+environment: "dev"
+
+# Chart information
+chart_name: "metabase-k8s"
+chart_repo_name: "arconixforge"
+chart_repo: "https://arconixforge.github.io/metabase-k8s"
+chart_version: "1.0.0"
+
+# Cluster information
+cloud_provider: "gcp"  # Options: gcp, aws, azure, local
+cluster_name: "dev-cluster"
+
+# Kubernetes settings
+namespace: "metabase-dev"
+release_name: "metabase-dev"
+create_namespace: true
+
+# Metabase specific settings
+app_name: "metabase-k8s"
+expected_replicas: 1
+persistence_enabled: true
+istio_enabled: false
+metabase_db_type: "h2"  # Using embedded H2 database for dev
+
+# Deployment validation
+validation_level: "basic"
+error_threshold: 10  # Higher threshold for development to allow more verbose logging
+
+# Development-specific resource settings - lower than production
+resources:
+  requests:
+    cpu: "200m"
+    memory: "256Mi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+
+# Values to set for the Helm chart
+set_values:
+  "replicaCount": "1"
+  "persistence.enabled": "true"
+  "persistence.size": "5Gi"
+  "metabase.env[0].name": "MB_PLUGINS_DIR"
+  "metabase.env[0].value": "/plugins"
+  "metabase.env[1].name": "MB_DB_FILE"
+  "metabase.env[1].value": "/metabase-data/metabase.db"
+  "istio.enabled": "false"
+  "resources.requests.cpu": "200m"
+  "resources.requests.memory": "256Mi"
+  "resources.limits.cpu": "1"
+  "resources.limits.memory": "1Gi"

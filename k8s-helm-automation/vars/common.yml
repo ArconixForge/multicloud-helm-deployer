@@ -1,0 +1,50 @@
+---
+# Common variables for all environments
+
+# General settings
+timeout: "300s"
+wait: true
+atomic: true
+create_namespace: true
+
+# Validation settings
+validate: true
+validation_level: "basic"
+validation_timeout: 300
+validation_retries: 3
+expected_replicas: 1
+fail_on_validation_error: true
+debug_output: false
+
+# Chart settings
+update_repo: true
+verify_chart_version: true
+
+# Deployment history
+record_history: true
+history_dir: "./history"
+
+# Backup settings for upgrades
+backup_before_upgrade: true
+backup_dir: "./backups"
+
+# Linting and dry run
+perform_lint: false
+dry_run: false
+
+# Security settings
+no_log_credentials: true
+
+# Resource validation
+validate_resources: true
+validate_persistence: true
+validate_health_endpoint: false
+
+# Default resource limits and requests
+default_resources:
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+  requests:
+    cpu: "100m"
+    memory: "256Mi"

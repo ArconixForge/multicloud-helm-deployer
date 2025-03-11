@@ -1,0 +1,87 @@
+---
+# roles/helm/repo/tasks/main.yml
+# Helm repository management tasks
+
+- name: Check if Helm is installed
+  command: which helm
+  register: helm_check
+  failed_when: false
+  changed_when: false
+
+- name: Fail if Helm is not installed
+  fail:
+    msg: "Helm is required but was not found"
+  when: helm_check.rc != 0
+
+- name: Set default chart repository name
+  set_fact:
+    chart_repo_name: "{{ chart_repo_name | default(chart_name) }}"
+  when: chart_repo is defined and chart_repo | length > 0
+
+- name: List configured Helm repositories
+  command: helm repo list -o json
+  register: helm_repos
+  failed_when: false
+  changed_when: false
+
+- name: Parse Helm repositories JSON
+  set_fact:
+    repo_list: "{{ helm_repos.stdout | default('[]') | from_json }}"
+  when: helm_repos.rc == 0
+
+- name: Check if repository already exists
+  set_fact:
+    repo_exists: "{{ repo_list | selectattr('name', 'equalto', chart_repo_name) | list | length > 0 }}"
+  when: helm_repos.rc == 0
+
+- name: Add Helm repository
+  command: helm repo add {{ chart_repo_name }} {{ chart_repo }}
+  when: 
+    - chart_repo is defined 
+    - chart_repo | length > 0
+    - helm_repos.rc != 0 or (repo_exists is defined and not repo_exists)
+  register: repo_add
+
+- name: Update Helm repository
+  command: helm repo update {{ chart_repo_name }}
+  when: 
+    - chart_repo is defined 
+    - chart_repo | length > 0
+    - update_repo | default(true) | bool
+    - repo_add.changed or (repo_exists is defined and repo_exists)
+  register: repo_update
+
+- name: Check for available chart versions
+  command: helm search repo {{ chart_repo_name }}/{{ chart_name }} -o json
+  register: chart_search
+  failed_when: false
+  changed_when: false
+  when: chart_repo is defined and chart_repo | length > 0
+
+- name: Parse available chart versions
+  set_fact:
+    available_versions: "{{ chart_search.stdout | default('[]') | from_json | map(attribute='version') | list }}"
+  when: chart_search.rc == 0
+
+- name: Display available chart versions
+  debug:
+    msg: "Available versions for {{ chart_name }}: {{ available_versions | join(', ') }}"
+  when: 
+    - chart_search.rc == 0
+    - available_versions is defined
+    - available_versions | length > 0
+    - debug_output | default(false) | bool
+
+- name: Verify chart version is available
+  assert:
+    that:
+      - chart_version in available_versions
+    fail_msg: "Requested chart version {{ chart_version }} is not available. Available versions are: {{ available_versions | join(', ') }}"
+    success_msg: "Verified chart version {{ chart_version }} is available"
+  when: 
+    - chart_version is defined
+    - chart_version | length > 0
+    - chart_search.rc == 0
+    - available_versions is defined
+    - available_versions | length > 0
+    - verify_chart_version | default(true) | bool

@@ -1,0 +1,28 @@
+---
+# AWS-specific variables
+# NOTE: Sensitive values should be provided via environment variables or Ansible Vault
+
+# Region settings
+aws_region: "{{ lookup('env', 'AWS_REGION') | default('us-east-1') }}"
+aws_az: "{{ lookup('env', 'AWS_AZ') | default('us-east-1a') }}"
+
+# Authentication
+# These values should be passed securely, preferably via environment variables
+aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+aws_token: "{{ lookup('env', 'AWS_SESSION_TOKEN') | default('') }}"
+aws_profile: "{{ lookup('env', 'AWS_PROFILE') | default('') }}"
+
+# EKS cluster settings
+eks_cluster_version: "{{ lookup('env', 'EKS_CLUSTER_VERSION') | default('') }}"
+
+# AWS storage settings
+aws_storage_class: "{{ lookup('env', 'AWS_STORAGE_CLASS') | default('gp2') }}"
+
+# AWS-specific Helm overrides
+aws_specific_overrides:
+  persistence:
+    storageClass: "{{ aws_storage_class }}"
+  service:
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb

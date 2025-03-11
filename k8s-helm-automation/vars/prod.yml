@@ -1,0 +1,96 @@
+---
+# Production environment variables for Metabase deployment
+
+# Environment identifier
+environment: "prod"
+
+# Chart information
+chart_name: "metabase-k8s"
+chart_repo_name: "arconixforge"
+chart_repo: "https://arconixforge.github.io/metabase-k8s"
+chart_version: "1.0.0"
+
+# Cluster information
+cloud_provider: "gcp"  # Options: gcp, aws, azure, local
+cluster_name: "prod-cluster"
+
+# Kubernetes settings
+namespace: "metabase"
+release_name: "metabase"
+create_namespace: true
+
+# Deployment control
+perform_lint: true
+dry_run: false
+wait: true
+atomic: true
+timeout: "600s"  # Longer timeout for production
+
+# Metabase specific settings
+app_name: "metabase-k8s"
+expected_replicas: 2
+persistence_enabled: true
+istio_enabled: true
+metabase_db_type: "postgres"  # External database for production
+health_endpoint: "/api/health"
+validate_health_endpoint: true
+
+# Deployment validation
+validation_level: "full"
+error_threshold: 2  # Lower threshold for production to catch potential issues
+fail_on_validation_error: true
+
+# Production-specific resource settings
+resources:
+  requests:
+    cpu: "1"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"
+
+# Values to set for the Helm chart
+set_values:
+  "replicaCount": "2"
+  "persistence.enabled": "true"
+  "persistence.size": "20Gi"
+  "resources.requests.cpu": "1"
+  "resources.requests.memory": "1Gi"
+  "resources.limits.cpu": "2"
+  "resources.limits.memory": "4Gi"
+  "metabase.env[0].name": "MB_DB_TYPE"
+  "metabase.env[0].value": "postgres"
+  "metabase.env[1].name": "MB_DB_HOST"
+  "metabase.env[1].value": "postgres-host.prod"
+  "metabase.env[2].name": "MB_DB_PORT"
+  "metabase.env[2].value": "5432"
+  "metabase.env[3].name": "MB_DB_DBNAME"
+  "metabase.env[3].value": "metabase_db"
+  "metabase.env[4].name": "MB_DB_USER" 
+  "metabase.env[4].value": "metabase_user"
+  # Password should be provided securely - not hardcoded here
+  "istio.enabled": "true"
+  "istio.host": "metabase.example.com"
+  "istio.gateway": "production-gateway"
+  "istio.prefix": "/metabase"
+
+# Security settings
+# These would typically come from secure variables or a vault
+# db_credentials:
+#   user: "metabase_user"
+#   password: "{{ lookup('env', 'METABASE_DB_PASSWORD') }}"
+
+# Network policies for production namespace
+network_policies:
+  enabled: true
+  default_deny: true
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: istio-ingressgateway
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres

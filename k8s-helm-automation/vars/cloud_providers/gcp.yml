@@ -1,0 +1,25 @@
+---
+# GCP-specific variables
+# NOTE: Sensitive values should be provided via environment variables or Ansible Vault
+
+# Region settings
+gcp_region: "{{ lookup('env', 'GCP_REGION') | default('us-central1') }}"
+gcp_zone: "{{ lookup('env', 'GCP_ZONE') | default('us-central1-a') }}"
+
+# Project settings
+gcp_project: "{{ lookup('env', 'GCP_PROJECT') }}"
+
+# Authentication
+# If using a service account key file
+gcp_key_file: "{{ lookup('env', 'GCP_KEY_FILE') | default('') }}"
+
+# GKE cluster settings
+gke_cluster_version: "{{ lookup('env', 'GKE_CLUSTER_VERSION') | default('latest') }}"
+
+# GCP storage settings
+gcp_storage_class: "{{ lookup('env', 'GCP_STORAGE_CLASS') | default('standard-rwo') }}"
+
+# GCP-specific Helm overrides
+gcp_specific_overrides:
+  persistence:
+    storageClass: "{{ gcp_storage_class }}"

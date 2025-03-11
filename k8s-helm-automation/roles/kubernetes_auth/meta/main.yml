@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  role_name: kubernetes_auth
+  author: ArconixForge
+  description: Kubernetes authentication role for multi-cloud deployments
+  company: ArconixForge
+  license: Apache-2.0
+  min_ansible_version: 2.10
+  platforms:
+    - name: GenericLinux
+      versions:
+        - all
+  galaxy_tags:
+    - kubernetes
+    - cloud
+    - authentication
+    - gcp
+    - aws
+    - azure
+dependencies: []

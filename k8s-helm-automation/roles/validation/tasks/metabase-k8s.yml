@@ -1,0 +1,159 @@
+---
+# roles/validation/tasks/metabase-k8s.yml
+# Metabase-specific validation tasks
+
+- name: Set Metabase validation parameters
+  set_fact:
+    metabase_port: "{{ metabase_port | default(3000) }}"
+    metabase_health_endpoint: "{{ metabase_health_endpoint | default('/api/health') }}"
+    metabase_admin_email: "{{ metabase_admin_email | default('admin@metabase.local') }}"
+    metabase_db_type: "{{ metabase_db_type | default('h2') }}"
+
+- name: Wait longer for Metabase pods to be fully ready
+  shell: |
+    sleep 20  # Additional time for Metabase initialization
+    kubectl get pods -n {{ namespace }} -l app={{ app_name | default(release_name) }} | grep -v NAME | grep "Running" | wc -l
+  register: metabase_pods_ready
+  until: metabase_pods_ready.stdout | int > 0
+  retries: 10
+  delay: 15
+
+- name: Get Metabase pod name
+  shell: kubectl get pods -n {{ namespace }} -l app={{ app_name | default(release_name) }} -o name | head -n 1
+  register: metabase_pod
+
+- name: Basic Metabase functionality check
+  shell: |
+    POD="{{ metabase_pod.stdout }}"
+    
+    echo "Testing Metabase API access..."
+    if kubectl exec -n {{ namespace }} $POD -- curl -s http://localhost:{{ metabase_port }}/api/session/properties | grep -q "setup-token"; then
+      echo "Metabase API accessible and returning setup or session properties"
+      exit 0
+    else
+      echo "Could not access Metabase API"
+      exit 1
+    fi
+  register: metabase_api_check
+  failed_when: false
+
+- name: Display Metabase API check results
+  debug:
+    var: metabase_api_check.stdout_lines
+
+- name: Check Metabase database connection
+  when: 
+    - metabase_db_type != "h2"
+    - validation_level == "full"
+  shell: |
+    POD="{{ metabase_pod.stdout }}"
+    
+    echo "Testing Metabase database connection..."
+    kubectl exec -n {{ namespace }} $POD -- env | grep MB_DB
+    
+    # Look for database connection errors in logs
+    if kubectl logs -n {{ namespace }} $POD | grep -i "database connection established"; then
+      echo "Metabase database connection successful"
+      exit 0
+    elif kubectl logs -n {{ namespace }} $POD | grep -i "failed to connect to database\|database connection error"; then
+      echo "Metabase database connection failed"
+      exit 1
+    else
+      echo "Could not determine database connection status"
+      exit 0
+    fi
+  register: metabase_db_check
+  failed_when: false
+
+- name: Display Metabase database check results
+  debug:
+    var: metabase_db_check.stdout_lines
+  when: 
+    - metabase_db_type != "h2"
+    - validation_level == "full"
+
+- name: Check Metabase persistence
+  when: persistence_enabled | default(true) | bool
+  shell: |
+    echo "Checking Metabase persistence volume..."
+    
+    # Check for persistent volume claims
+    PVC_COUNT=$(kubectl get pvc -n {{ namespace }} -l app={{ app_name | default(release_name) }} | grep -v NAME | wc -l)
+    
+    if [ $PVC_COUNT -eq 0 ]; then
+      echo "No PVCs found for Metabase, but persistence is enabled"
+      exit 1
+    fi
+    
+    # Check if the volume is mounted
+    POD="{{ metabase_pod.stdout }}"
+    if kubectl exec -n {{ namespace }} $POD -- ls -la /metabase-data; then
+      echo "Metabase data directory is accessible"
+      exit 0
+    else
+      echo "Metabase data directory not accessible"
+      exit 1
+    fi
+  register: metabase_persistence_check
+  failed_when: false
+
+- name: Display Metabase persistence check results
+  debug:
+    var: metabase_persistence_check.stdout_lines
+  when: persistence_enabled | default(true) | bool
+
+- name: Check Istio integration
+  when: 
+    - istio_enabled | default(false) | bool
+    - validation_level == "full"
+  shell: |
+    echo "Checking Istio VirtualService..."
+    
+    # Check for VirtualService
+    if kubectl get virtualservice -n {{ namespace }} | grep -q "{{ release_name }}"; then
+      echo "VirtualService found for Metabase"
+      
+      # Check VirtualService configuration
+      HOST=$(kubectl get virtualservice -n {{ namespace }} {{ release_name }}-vs -o jsonpath='{.spec.hosts[0]}')
+      PREFIX=$(kubectl get virtualservice -n {{ namespace }} {{ release_name }}-vs -o jsonpath='{.spec.http[0].match[0].uri.prefix}')
+      
+      echo "Host: $HOST, Prefix: $PREFIX"
+      
+      # Additional validation could be added here
+      exit 0
+    else
+      echo "No VirtualService found for Metabase, but Istio is enabled"
+      exit 1
+    fi
+  register: metabase_istio_check
+  failed_when: false
+
+- name: Display Metabase Istio check results
+  debug:
+    var: metabase_istio_check.stdout_lines
+  when: 
+    - istio_enabled | default(false) | bool
+    - validation_level == "full"
+
+- name: Gather Metabase validation results
+  set_fact:
+    metabase_validation_success: >-
+      {{ 
+        (metabase_api_check.rc == 0) and 
+        (metabase_db_type == 'h2' or metabase_db_check.rc == 0) and
+        (not persistence_enabled|default(true)|bool or metabase_persistence_check.rc == 0) and
+        (not istio_enabled|default(false)|bool or metabase_istio_check.rc == 0)
+      }}
+    metabase_validation_message: >-
+      Metabase validation {{ 
+        'passed' if 
+          (metabase_api_check.rc == 0) and 
+          (metabase_db_type == 'h2' or metabase_db_check.rc == 0) and
+          (not persistence_enabled|default(true)|bool or metabase_persistence_check.rc == 0) and
+          (not istio_enabled|default(false)|bool or metabase_istio_check.rc == 0)
+        else 'failed'
+      }}
+
+- name: Display Metabase validation summary
+  debug:
+    msg: "{{ metabase_validation_message }}"

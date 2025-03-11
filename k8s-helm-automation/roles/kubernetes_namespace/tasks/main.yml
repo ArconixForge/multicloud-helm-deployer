@@ -1,0 +1,111 @@
+---
+# roles/kubernetes/namespace/tasks/main.yml
+# Namespace management for Kubernetes deployments
+
+- name: Set default namespace
+  set_fact:
+    namespace: "{{ namespace | default('default') }}"
+
+- name: Check if namespace exists
+  command: kubectl get namespace {{ namespace }}
+  register: namespace_check
+  failed_when: false
+  changed_when: false
+
+- name: Create namespace if it doesn't exist
+  command: kubectl create namespace {{ namespace }}
+  when: namespace_check.rc != 0
+  register: namespace_create
+
+- name: Apply resource quotas if defined
+  when: 
+    - resource_quotas is defined
+    - namespace_create.changed | default(false) | bool
+  block:
+    - name: Create temporary quota file
+      tempfile:
+        state: file
+        suffix: quota.yml
+      register: quota_file
+      
+    - name: Create resource quota template
+      copy:
+        dest: "{{ quota_file.path }}"
+        content: |
+          apiVersion: v1
+          kind: ResourceQuota
+          metadata:
+            name: {{ namespace }}-quota
+            namespace: {{ namespace }}
+          spec:
+            hard:
+              {% for resource, limit in resource_quotas.items() %}
+              {{ resource }}: {{ limit }}
+              {% endfor %}
+      
+    - name: Apply resource quota
+      command: kubectl apply -f {{ quota_file.path }}
+      register: quota_result
+      
+    - name: Clean up temp file
+      file:
+        path: "{{ quota_file.path }}"
+        state: absent
+      when: quota_file.path is defined
+
+- name: Apply namespace labels if defined
+  when: namespace_labels is defined
+  block:
+    - name: Apply labels to namespace
+      command: >
+        kubectl label --overwrite namespace {{ namespace }}
+        {% for key, value in namespace_labels.items() %}
+        {{ key }}={{ value }}
+        {% endfor %}
+      register: label_result
+
+- name: Apply network policies if enabled
+  when: 
+    - network_policies is defined
+    - network_policies.enabled | default(false) | bool
+  block:
+    - name: Create temporary network policy file
+      tempfile:
+        state: file
+        suffix: netpol.yml
+      register: netpol_file
+      
+    - name: Create default network policy template
+      copy:
+        dest: "{{ netpol_file.path }}"
+        content: |
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: default-deny
+            namespace: {{ namespace }}
+          spec:
+            podSelector: {}
+            policyTypes:
+            - Ingress
+            - Egress
+            ingress:
+            {{ network_policies.ingress | default([]) | to_yaml }}
+            egress:
+            {{ network_policies.egress | default([]) | to_yaml }}
+      when: network_policies.default_deny | default(false) | bool
+        
+    - name: Apply network policy
+      command: kubectl apply -f {{ netpol_file.path }}
+      register: netpol_result
+      when: network_policies.default_deny | default(false) | bool
+      
+    - name: Clean up temp file
+      file:
+        path: "{{ netpol_file.path }}"
+        state: absent
+      when: netpol_file.path is defined
+
+- name: Display namespace status
+  debug:
+    msg: "Namespace {{ namespace }} is {{ 'ready' if namespace_check.rc == 0 else 'created' }}"

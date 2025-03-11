@@ -1,0 +1,153 @@
+---
+# roles/helm/deploy/tasks/main.yml
+# Helm chart deployment tasks
+
+- name: Check current Helm releases
+  command: helm list -n {{ namespace | default('default') }} -o json
+  register: helm_list
+  failed_when: false
+  changed_when: false
+
+- name: Parse Helm releases JSON
+  set_fact:
+    releases: "{{ helm_list.stdout | default('[]') | from_json }}"
+  when: helm_list.rc == 0
+
+- name: Check if release already exists
+  set_fact:
+    release_exists: "{{ releases | selectattr('name', 'equalto', release_name) | list | length > 0 }}"
+  when: helm_list.rc == 0
+
+- name: Check if values file exists
+  stat:
+    path: "{{ values_file }}"
+  register: values_file_stat
+  when: values_file is defined and values_file | length > 0
+
+- name: Fail if values file doesn't exist
+  fail:
+    msg: "Values file {{ values_file }} does not exist"
+  when: 
+    - values_file is defined 
+    - values_file | length > 0
+    - not values_file_stat.stat.exists
+
+- name: Prepare base Helm command
+  set_fact:
+    helm_cmd: >-
+      helm upgrade --install {{ release_name }} 
+      {% if chart_repo is defined and chart_repo | length > 0 %}{{ chart_repo_name | default(chart_name) }}/{{ chart_name }}{% else %}{{ chart_path | default(chart_name) }}{% endif %}
+      --namespace {{ namespace | default('default') }}
+      {% if chart_version is defined and chart_version | length > 0 %}--version {{ chart_version }}{% endif %}
+      {% if values_file is defined and values_file | length > 0 and values_file_stat.stat.exists %}--values {{ values_file }}{% endif %}
+      {% if atomic | default(true) | bool %}--atomic{% endif %}
+      {% if wait | default(true) | bool %}--wait{% endif %}
+      --timeout {{ timeout | default('300s') }}
+      {% if create_namespace | default(true) | bool %}--create-namespace{% endif %}
+
+# Process value overrides
+- name: Add --set parameters to Helm command
+  set_fact:
+    helm_cmd: "{{ helm_cmd }} --set {{ item.key }}={{ item.value }}"
+  with_dict: "{{ set_values | default({}) }}"
+  when: set_values is defined and set_values | length > 0
+
+# Process value files
+- name: Add --values parameters to Helm command
+  set_fact:
+    helm_cmd: "{{ helm_cmd }} --values {{ item }}"
+  with_items: "{{ extra_values_files | default([]) }}"
+  when: extra_values_files is defined and extra_values_files | length > 0
+
+- name: Prepare for rollback if needed
+  when: 
+    - release_exists | default(false) | bool
+    - backup_before_upgrade | default(false) | bool
+  block:
+    - name: Get current release info for backup
+      command: helm get all {{ release_name }} -n {{ namespace | default('default') }} -o yaml
+      register: current_release
+      
+    - name: Create backup directory
+      file:
+        path: "{{ backup_dir | default('./backups') }}/{{ release_name }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+      
+    - name: Save current release state
+      copy:
+        content: "{{ current_release.stdout }}"
+        dest: "{{ backup_dir | default('./backups') }}/{{ release_name }}/{{ release_name }}-{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}.yaml"
+      delegate_to: localhost
+      run_once: true
+
+- name: Perform Helm lint if enabled
+  command: >-
+    helm lint 
+    {% if chart_repo is defined and chart_repo | length > 0 %}{{ chart_repo_name | default(chart_name) }}/{{ chart_name }}{% else %}{{ chart_path | default(chart_name) }}{% endif %}
+    {% if values_file is defined and values_file | length > 0 and values_file_stat.stat.exists %}--values {{ values_file }}{% endif %}
+  register: helm_lint
+  when: perform_lint | default(false) | bool
+  
+- name: Display lint results
+  debug:
+    var: helm_lint.stdout_lines
+  when: 
+    - perform_lint | default(false) | bool
+    - helm_lint.rc == 0
+
+- name: Perform Helm dry-run if enabled
+  command: "{{ helm_cmd }} --dry-run"
+  register: helm_dry_run
+  when: dry_run | default(false) | bool
+
+- name: Display dry-run results
+  debug:
+    var: helm_dry_run.stdout_lines
+  when: 
+    - dry_run | default(false) | bool
+    - helm_dry_run.rc == 0
+
+- name: Deploy chart using Helm
+  command: "{{ helm_cmd }}"
+  register: helm_deploy
+  when: not (dry_run | default(false) | bool)
+
+- name: Display deployment output
+  debug:
+    var: helm_deploy.stdout_lines
+  when: 
+    - not (dry_run | default(false) | bool)
+    - helm_deploy.rc == 0
+    - debug_output | default(false) | bool
+
+- name: Set deployment result
+  set_fact:
+    deployment_successful: "{{ helm_deploy.rc == 0 }}"
+  when: not (dry_run | default(false) | bool)
+
+- name: Show deployed release information
+  command: helm status {{ release_name }} -n {{ namespace | default('default') }}
+  register: helm_status
+  when: 
+    - not (dry_run | default(false) | bool)
+    - deployment_successful | default(false) | bool
+
+- name: Record deployment in history
+  copy:
+    content: |
+      Deployment performed at {{ ansible_date_time.iso8601 }}
+      Release: {{ release_name }}
+      Chart: {{ chart_name }}
+      Version: {{ chart_version | default('latest') }}
+      Namespace: {{ namespace | default('default') }}
+      Result: {{ 'Success' if deployment_successful | default(false) else 'Failed' }}
+    dest: "{{ history_dir | default('./history') }}/{{ release_name }}-{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}.log"
+    mode: '0644'
+  when: 
+    - record_history | default(false) | bool
+    - not (dry_run | default(false) | bool)
+  delegate_to: localhost
+  run_once: true
